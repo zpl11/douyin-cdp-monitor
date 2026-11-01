@@ -4,8 +4,12 @@ import html
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
+import tempfile
 import threading
+import time
 from datetime import datetime
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -345,6 +349,77 @@ class AIChatWorker(QThread):
             self.sig_error.emit(str(e))
 
 
+class CodeRunnerWorker(QThread):
+    """独立的 Python 代码执行工作线程，使用当前 Python 解释器与虚拟环境异步运行"""
+    sig_stdout = Signal(str)
+    sig_stderr = Signal(str)
+    sig_finished = Signal(int, float)  # returncode, elapsed_seconds
+
+    def __init__(self, code_str: str):
+        super().__init__()
+        self.code_str = code_str
+        self.proc: Optional[subprocess.Popen] = None
+        self._killed = False
+
+    def run(self):
+        start_time = time.time()
+        temp_dir = tempfile.gettempdir()
+        temp_file = os.path.join(temp_dir, f"cdp_ai_runner_{int(time.time() * 1000)}.py")
+        try:
+            with open(temp_file, "w", encoding="utf-8") as f:
+                f.write(self.code_str)
+
+            # 使用当前环境解释器 sys.executable，带 -u 无缓冲打印
+            self.proc = subprocess.Popen(
+                [sys.executable, "-u", temp_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            )
+
+            def read_pipe(pipe, is_stderr: bool):
+                for line in iter(pipe.readline, ""):
+                    if self._killed:
+                        break
+                    if is_stderr:
+                        self.sig_stderr.emit(line)
+                    else:
+                        self.sig_stdout.emit(line)
+                pipe.close()
+
+            t_out = threading.Thread(target=read_pipe, args=(self.proc.stdout, False), daemon=True)
+            t_err = threading.Thread(target=read_pipe, args=(self.proc.stderr, True), daemon=True)
+            t_out.start()
+            t_err.start()
+
+            self.proc.wait()
+            t_out.join(timeout=1.0)
+            t_err.join(timeout=1.0)
+
+            elapsed = time.time() - start_time
+            self.sig_finished.emit(self.proc.returncode if not self._killed else -1, elapsed)
+        except Exception as e:
+            self.sig_stderr.emit(f"\n[执行异常]: {e}\n")
+            self.sig_finished.emit(-1, time.time() - start_time)
+        finally:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except Exception:
+                pass
+
+    def stop(self):
+        self._killed = True
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
 # ── 主窗口 ───────────────────────────────────────────────────────────────────
 
 
@@ -370,6 +445,9 @@ class CDPMonitorApp(QMainWindow):
         self.ai_chat_worker: Optional[AIChatWorker] = None
         self._current_ai_raw_chunks: list[str] = []
         self._current_ai_start_pos: Optional[int] = None
+        self.code_runner_worker: Optional[CodeRunnerWorker] = None
+        self._last_run_stdout: str = ""
+        self._last_run_stderr: str = ""
 
         # 初始化后台 CDP 线程
         self.cdp_runner = CDPRunner(self.config["cdp_url"])
@@ -497,11 +575,11 @@ class CDPMonitorApp(QMainWindow):
 
         root_layout.addLayout(filter_bar)
 
-        # ── 主体 Splitter (上下分割：上方网络请求与详情，下方 AI 分析) ──
-        main_v_splitter = QSplitter(Qt.Orientation.Vertical)
+        # ── 主体 Splitter (左右大分割：左侧网络分析与详情，右侧 AI 对话与代码运行器) ──
+        main_h_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 上半部分：左右分割 (左侧请求列表，右侧请求详情)
-        upper_h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        # 左侧面板：垂直分割 (上方网络请求列表，下方请求与 WS 详情)
+        left_v_splitter = QSplitter(Qt.Orientation.Vertical)
 
         # 左侧表格
         table_group = QGroupBox("捕获的网络请求 (Network Events)")
@@ -617,7 +695,7 @@ class CDPMonitorApp(QMainWindow):
         self.req_table.itemSelectionChanged.connect(self._on_table_row_selected)
         self.req_table.itemChanged.connect(self._on_table_item_changed)
         table_layout.addWidget(self.req_table)
-        upper_h_splitter.addWidget(table_group)
+        left_v_splitter.addWidget(table_group)
 
         # 右侧详情 TabWidget
         detail_group = QGroupBox("请求与响应详情 (Details)")
@@ -752,14 +830,12 @@ class CDPMonitorApp(QMainWindow):
         self.detail_tabs.addTab(ws_widget, "WS 消息帧 (Frames)")
 
         detail_layout.addWidget(self.detail_tabs)
-        upper_h_splitter.addWidget(detail_group)
+        left_v_splitter.addWidget(detail_group)
+        left_v_splitter.setStretchFactor(0, 3)
+        left_v_splitter.setStretchFactor(1, 2)
 
-        upper_h_splitter.setStretchFactor(0, 3)
-        upper_h_splitter.setStretchFactor(1, 2)
-        main_v_splitter.addWidget(upper_h_splitter)
-
-        # ── 下半部分：AI 逆向副驾驶 (持续多轮对话) ──
-        ai_group = QGroupBox("🤖 AI 逆向副驾驶 (持续多轮对话 · 实时上下文联动)")
+        # ── 右侧面板：AI 逆向副驾驶 & Python 脚本运行工作台 ──
+        ai_group = QGroupBox("🤖 AI 逆向副驾驶 & Python 代码调试终端")
         ai_layout = QVBoxLayout(ai_group)
         ai_layout.setContentsMargins(10, 10, 10, 10)
         ai_layout.setSpacing(6)
@@ -779,7 +855,10 @@ class CDPMonitorApp(QMainWindow):
         ctx_bar.addWidget(self.btn_test_model)
         ai_layout.addLayout(ctx_bar)
 
-        # 2. 对话历史展示区
+        # 2. 中间：垂直分割器 (上半部分为对话历史，下半部分为代码运行工作台)
+        ai_v_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # 2.1 对话历史展示区
         self.chat_display = QTextEdit()
         self.chat_display.setReadOnly(True)
         self.chat_display.setStyleSheet("""
@@ -793,7 +872,99 @@ class CDPMonitorApp(QMainWindow):
                 line-height: 1.5;
             }
         """)
-        ai_layout.addWidget(self.chat_display, 1)
+        ai_v_splitter.addWidget(self.chat_display)
+
+        # 2.2 代码执行器工作台 (Code Runner)
+        runner_group = QGroupBox("⚡ 交互式代码运行器 (Code Runner)")
+        runner_layout = QVBoxLayout(runner_group)
+        runner_layout.setContentsMargins(8, 8, 8, 8)
+        runner_layout.setSpacing(6)
+
+        # 运行器控制条
+        runner_ctrl_bar = QHBoxLayout()
+        runner_ctrl_bar.setSpacing(6)
+
+        self.btn_extract_code = QPushButton("📥 提取最新代码")
+        self.btn_extract_code.setCursor(Qt.PointingHandCursor)
+        self.btn_extract_code.setStyleSheet("background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+        self.btn_extract_code.clicked.connect(self._extract_latest_code_from_chat)
+        runner_ctrl_bar.addWidget(self.btn_extract_code)
+
+        self.btn_run_code = QPushButton("▶️ 运行代码 (Run)")
+        self.btn_run_code.setCursor(Qt.PointingHandCursor)
+        self.btn_run_code.setStyleSheet("background: #16a34a; color: white; font-weight: bold; border-radius: 4px; padding: 4px 12px; font-size: 12px;")
+        self.btn_run_code.clicked.connect(self._run_code)
+        runner_ctrl_bar.addWidget(self.btn_run_code)
+
+        self.btn_stop_code = QPushButton("⏹️ 终止")
+        self.btn_stop_code.setEnabled(False)
+        self.btn_stop_code.setCursor(Qt.PointingHandCursor)
+        self.btn_stop_code.setStyleSheet("background: #dc2626; color: white; font-weight: bold; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+        self.btn_stop_code.clicked.connect(self._stop_code)
+        runner_ctrl_bar.addWidget(self.btn_stop_code)
+
+        self.btn_clear_console = QPushButton("🧹 清空输出")
+        self.btn_clear_console.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_console.setStyleSheet("padding: 4px 8px; font-size: 11px;")
+        self.btn_clear_console.clicked.connect(self._clear_console)
+        runner_ctrl_bar.addWidget(self.btn_clear_console)
+
+        self.btn_feedback_result = QPushButton("💬 将执行结果发给 AI 继续分析")
+        self.btn_feedback_result.setCursor(Qt.PointingHandCursor)
+        self.btn_feedback_result.setStyleSheet("background: #0284c7; color: white; font-weight: bold; border-radius: 4px; padding: 4px 10px; font-size: 11px;")
+        self.btn_feedback_result.clicked.connect(self._feedback_run_result_to_ai)
+        runner_ctrl_bar.addWidget(self.btn_feedback_result)
+
+        runner_ctrl_bar.addStretch()
+
+        self.lbl_runner_status = QLabel("就绪 (可直接编辑并执行 Python 爬虫脚本)")
+        self.lbl_runner_status.setStyleSheet("color: #64748b; font-size: 11px;")
+        runner_ctrl_bar.addWidget(self.lbl_runner_status)
+
+        runner_layout.addLayout(runner_ctrl_bar)
+
+        # 选项卡：代码编辑与运行输出
+        self.runner_tabs = QTabWidget()
+
+        # Tab 1: 代码编辑框
+        self.code_edit = QTextEdit()
+        self.code_edit.setFont(QFont("Consolas", 10))
+        self.code_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8fafc;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                color: #0f172a;
+                padding: 6px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+        """)
+        self.code_edit.setPlaceholderText("# 在此编辑或查看 Python 代码，AI 生成的代码块会自动提取至此处...\n# 点击上方「▶️ 运行代码」可直接执行并查看返回结果")
+        self.runner_tabs.addTab(self.code_edit, "💻 Python 待执行脚本")
+
+        # Tab 2: 控制台输出
+        self.code_console = QTextEdit()
+        self.code_console.setReadOnly(True)
+        self.code_console.setFont(QFont("Consolas", 10))
+        self.code_console.setStyleSheet("""
+            QTextEdit {
+                background-color: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 4px;
+                color: #22c55e;
+                padding: 6px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+        """)
+        self.code_console.setPlaceholderText("终端就绪... 点击「▶️ 运行代码」后在此实时输出 stdout 和 stderr 信息。")
+        self.runner_tabs.addTab(self.code_console, "📟 终端执行结果 (Console)")
+
+        runner_layout.addWidget(self.runner_tabs)
+        ai_v_splitter.addWidget(runner_group)
+
+        ai_v_splitter.setStretchFactor(0, 5) # 对话区 55%
+        ai_v_splitter.setStretchFactor(1, 4) # 代码运行器 45%
+        ai_layout.addWidget(ai_v_splitter, 1)
 
         # 3. 快捷提问灵感标签 (Chips) - 点击自动填入输入框，用户可随时直接发送或编辑
         chips_layout = QHBoxLayout()
@@ -865,11 +1036,12 @@ class CDPMonitorApp(QMainWindow):
         # 初始化聊天欢迎语
         self._clear_chat()
 
-        main_v_splitter.addWidget(ai_group)
-        main_v_splitter.setStretchFactor(0, 3)
-        main_v_splitter.setStretchFactor(1, 2)
+        main_h_splitter.addWidget(left_v_splitter)
+        main_h_splitter.addWidget(ai_group)
+        main_h_splitter.setStretchFactor(0, 11)
+        main_h_splitter.setStretchFactor(1, 9)
 
-        root_layout.addWidget(main_v_splitter, 1)
+        root_layout.addWidget(main_h_splitter, 1)
 
         # 状态栏
         self.status_bar = QStatusBar()
@@ -1797,6 +1969,145 @@ class CDPMonitorApp(QMainWindow):
         self.btn_send.setEnabled(True)
         self._update_context_label()
 
+        # 5. 自动检测并提取 AI 生成的最新 Python 代码块到代码运行器
+        try:
+            py_blocks = re.findall(r"```(?:python|py)?\s*\n(.*?)```", raw_text, re.DOTALL)
+            if py_blocks:
+                latest_code = py_blocks[-1].strip()
+                if hasattr(self, "code_edit"):
+                    self.code_edit.setText(latest_code)
+                    line_cnt = len(latest_code.splitlines())
+                    if hasattr(self, "lbl_runner_status"):
+                        self.lbl_runner_status.setText(f"💡 已自动装填 AI 生成的 Python 脚本 ({line_cnt} 行)")
+        except Exception:
+            pass
+
+    # ── 交互式代码运行器 (Code Runner) 控制槽函数 ───────────────────────────
+
+    def _extract_latest_code_from_chat(self):
+        """手动从当前多轮对话记录中提取最新的 Python 代码块"""
+        code_found = ""
+        for msg in reversed(self.chat_messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                blocks = re.findall(r"```(?:python|py)?\s*\n(.*?)```", content, re.DOTALL)
+                if blocks:
+                    code_found = blocks[-1].strip()
+                    break
+
+        if code_found:
+            self.code_edit.setText(code_found)
+            self.runner_tabs.setCurrentIndex(0)
+            line_cnt = len(code_found.splitlines())
+            self.lbl_runner_status.setText(f"✅ 已装填 AI 最新 Python 脚本 ({line_cnt} 行)")
+            QMessageBox.information(self, "代码提取成功", f"已成功提取 AI 生成的 Python 脚本 ({line_cnt} 行)！\n可直接在左侧编辑，或点击「▶️ 运行代码」执行。")
+        else:
+            QMessageBox.information(self, "提示", "未在 AI 对话历史中检测到 Python 代码块 (```python ... ```)！")
+
+    def _run_code(self):
+        """异步执行用户编辑框中的 Python 代码"""
+        code = self.code_edit.toPlainText().strip()
+        if not code:
+            QMessageBox.information(self, "提示", "待执行代码为空！请先在代码编辑框中编写或从 AI 对话中提取代码。")
+            return
+
+        # 切换到控制台输出 Tab
+        self.runner_tabs.setCurrentIndex(1)
+        self.code_console.clear()
+        self._last_run_stdout = ""
+        self._last_run_stderr = ""
+
+        self.btn_run_code.setEnabled(False)
+        self.btn_stop_code.setEnabled(True)
+        now_str = datetime.now().strftime("%H:%M:%S")
+        self.lbl_runner_status.setText("⏳ 脚本正在运行中...")
+        self.code_console.append(
+            f"<div style='color: #38bdf8; font-weight: bold;'>🚀 [{now_str}] 启动 Python 执行环境... (解释器: {os.path.basename(sys.executable)})</div>"
+            f"<div style='color: #64748b;'>{'-' * 60}</div>\n"
+        )
+
+        self.code_runner_worker = CodeRunnerWorker(code)
+        self.code_runner_worker.sig_stdout.connect(self._on_code_stdout)
+        self.code_runner_worker.sig_stderr.connect(self._on_code_stderr)
+        self.code_runner_worker.sig_finished.connect(self._on_code_finished)
+        self.code_runner_worker.start()
+
+    def _on_code_stdout(self, line: str):
+        self._last_run_stdout += line
+        cursor = self.code_console.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(line)
+        self.code_console.setTextCursor(cursor)
+        self.code_console.ensureCursorVisible()
+
+    def _on_code_stderr(self, line: str):
+        self._last_run_stderr += line
+        cursor = self.code_console.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertHtml(f"<span style='color: #f87171;'>{html.escape(line)}</span>")
+        self.code_console.setTextCursor(cursor)
+        self.code_console.ensureCursorVisible()
+
+    def _on_code_finished(self, returncode: int, elapsed: float):
+        self.btn_run_code.setEnabled(True)
+        self.btn_stop_code.setEnabled(False)
+        color = "#22c55e" if returncode == 0 else "#ef4444"
+        status_tag = "成功执行完成" if returncode == 0 else f"异常退出 (Exit Code: {returncode})"
+        
+        self.code_console.append(
+            f"\n<div style='color: #64748b;'>{'-' * 60}</div>"
+            f"<div style='color: {color}; font-weight: bold;'>🏁 进程{status_tag} | 耗时: {elapsed:.2f}s</div>"
+        )
+        self.lbl_runner_status.setText(f"执行完毕 ({status_tag}, {elapsed:.2f}s)")
+        self.code_console.ensureCursorVisible()
+
+    def _stop_code(self):
+        """强制终止当前正在运行的 Python 子进程"""
+        if self.code_runner_worker and self.code_runner_worker.isRunning():
+            self.code_runner_worker.stop()
+            self.code_console.append("<div style='color: #f59e0b; font-weight: bold;'>⚠️ 用户手动终止了进程！</div>\n")
+            self.lbl_runner_status.setText("已终止运行")
+
+    def _clear_console(self):
+        """清空控制台输出"""
+        self.code_console.clear()
+        self._last_run_stdout = ""
+        self._last_run_stderr = ""
+        self.lbl_runner_status.setText("控制台已清空")
+
+    def _feedback_run_result_to_ai(self):
+        """将当前代码的执行输出/报错反馈给 AI 进行下一步分析诊断与代码优化"""
+        stdout_text = self._last_run_stdout.strip()
+        stderr_text = self._last_run_stderr.strip()
+
+        if not stdout_text and not stderr_text:
+            console_raw = self.code_console.toPlainText().strip()
+            if console_raw:
+                stdout_text = console_raw
+            else:
+                QMessageBox.information(self, "提示", "当前尚无代码运行输出记录！请先点击「▶️ 运行代码」执行。")
+                return
+
+        feedback = (
+            "我刚才在本地运行了上述 Python 爬取/测试脚本，控制台返回结果如下：\n"
+            "----------------------------------------\n"
+        )
+        if stdout_text:
+            show_out = stdout_text if len(stdout_text) <= 2500 else stdout_text[:2500] + f"\n... (其余 {len(stdout_text) - 2500} 字符已折叠)"
+            feedback += f"【标准输出 (Stdout)】:\n```\n{show_out}\n```\n"
+        if stderr_text:
+            show_err = stderr_text if len(stderr_text) <= 2500 else stderr_text[:2500] + f"\n... (其余 {len(stderr_text) - 2500} 字符已折叠)"
+            feedback += f"【错误与堆栈 (Stderr)】:\n```\n{show_err}\n```\n"
+
+        feedback += (
+            "----------------------------------------\n"
+            "请帮我根据上述执行结果进行分析：\n"
+            "1. 接口是否成功响应？核心业务数据是否成功提取出来？\n"
+            "2. 如果遇到报错、重定向、403 风控或 JSONDecodeError，请具体分析原因，并给出修复后的完整代码。"
+        )
+        self.chat_input.setText(feedback)
+        self._send_chat_message()
+
     def _on_ai_chat_error(self, err: str):
         tip_html = ""
         if "exceed" in err.lower() and "context" in err.lower():
@@ -1904,6 +2215,8 @@ class CDPMonitorApp(QMainWindow):
         QMessageBox.information(self, "配置保存", "设置已成功保存！")
 
     def closeEvent(self, event):
+        if self.code_runner_worker and self.code_runner_worker.isRunning():
+            self.code_runner_worker.stop()
         self.cdp_runner.stop()
         event.accept()
 
