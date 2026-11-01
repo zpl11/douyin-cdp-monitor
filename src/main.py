@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTableWidget,
@@ -577,9 +578,14 @@ class CDPMonitorApp(QMainWindow):
 
         # ── 主体 Splitter (左右大分割：左侧网络分析与详情，右侧 AI 对话与代码运行器) ──
         main_h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_h_splitter.setHandleWidth(7)
+        main_h_splitter.setChildrenCollapsible(False)
 
         # 左侧面板：垂直分割 (上方网络请求列表，下方请求与 WS 详情)
         left_v_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_v_splitter.setHandleWidth(6)
+        left_v_splitter.setChildrenCollapsible(False)
+        left_v_splitter.setMinimumWidth(300)
 
         # 左侧表格
         table_group = QGroupBox("捕获的网络请求 (Network Events)")
@@ -613,6 +619,31 @@ class CDPMonitorApp(QMainWindow):
         """)
         self.btn_filter_useful.toggled.connect(self._on_useful_filter_toggled)
         table_filter_bar.addWidget(self.btn_filter_useful)
+
+        self.btn_filter_ws = QPushButton("📡 仅看 WebSocket (0)")
+        self.btn_filter_ws.setCheckable(True)
+        self.btn_filter_ws.setChecked(False)
+        self.btn_filter_ws.setCursor(Qt.PointingHandCursor)
+        self.btn_filter_ws.setStyleSheet("""
+            QPushButton {
+                background-color: #faf5ff;
+                color: #7e22ce;
+                border: 1px solid #e9d5ff;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                background-color: #f3e8ff;
+            }
+            QPushButton:checked {
+                background-color: #7e22ce;
+                color: #ffffff;
+                border: 1px solid #6b21a8;
+            }
+        """)
+        self.btn_filter_ws.toggled.connect(self._on_ws_filter_toggled)
+        table_filter_bar.addWidget(self.btn_filter_ws)
 
         lbl_url_filter = QLabel("🔗 接口 URL:")
         lbl_url_filter.setStyleSheet("font-weight: bold; color: #334155; margin-left: 4px;")
@@ -703,7 +734,8 @@ class CDPMonitorApp(QMainWindow):
 
         # 详情面板顶部：在 AI 对话中探讨此接口
         detail_action_bar = QHBoxLayout()
-        self.btn_detail_discuss = QPushButton("💬 在 AI 对话中深入探讨此接口 (自动带入参数与返回值)")
+        self.btn_detail_discuss = QPushButton("💬 在 AI 对话中深入探讨此接口")
+        self.btn_detail_discuss.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.btn_detail_discuss.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;")
         self.btn_detail_discuss.clicked.connect(self._discuss_selected_in_chat)
         detail_action_bar.addWidget(self.btn_detail_discuss)
@@ -827,7 +859,7 @@ class CDPMonitorApp(QMainWindow):
         ws_splitter.setStretchFactor(1, 2)
 
         ws_layout.addWidget(ws_splitter)
-        self.detail_tabs.addTab(ws_widget, "WS 消息帧 (Frames)")
+        self.detail_tabs.addTab(ws_widget, "📡 WebSocket 消息帧")
 
         detail_layout.addWidget(self.detail_tabs)
         left_v_splitter.addWidget(detail_group)
@@ -836,6 +868,7 @@ class CDPMonitorApp(QMainWindow):
 
         # ── 右侧面板：AI 逆向副驾驶 & Python 脚本运行工作台 ──
         ai_group = QGroupBox("🤖 AI 逆向副驾驶 & Python 代码调试终端")
+        ai_group.setMinimumWidth(260)
         ai_layout = QVBoxLayout(ai_group)
         ai_layout.setContentsMargins(10, 10, 10, 10)
         ai_layout.setSpacing(6)
@@ -880,45 +913,46 @@ class CDPMonitorApp(QMainWindow):
         runner_layout.setContentsMargins(8, 8, 8, 8)
         runner_layout.setSpacing(6)
 
-        # 运行器控制条
+        # 运行器控制条 (精简紧凑，防止强行撑宽右侧面板)
         runner_ctrl_bar = QHBoxLayout()
-        runner_ctrl_bar.setSpacing(6)
+        runner_ctrl_bar.setSpacing(4)
 
-        self.btn_extract_code = QPushButton("📥 提取最新代码")
+        self.btn_extract_code = QPushButton("📥 提取代码")
         self.btn_extract_code.setCursor(Qt.PointingHandCursor)
-        self.btn_extract_code.setStyleSheet("background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+        self.btn_extract_code.setStyleSheet("background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 4px; padding: 3px 6px; font-size: 11px;")
         self.btn_extract_code.clicked.connect(self._extract_latest_code_from_chat)
         runner_ctrl_bar.addWidget(self.btn_extract_code)
 
-        self.btn_run_code = QPushButton("▶️ 运行代码 (Run)")
+        self.btn_run_code = QPushButton("▶️ 运行")
         self.btn_run_code.setCursor(Qt.PointingHandCursor)
-        self.btn_run_code.setStyleSheet("background: #16a34a; color: white; font-weight: bold; border-radius: 4px; padding: 4px 12px; font-size: 12px;")
+        self.btn_run_code.setStyleSheet("background: #16a34a; color: white; font-weight: bold; border-radius: 4px; padding: 3px 10px; font-size: 11px;")
         self.btn_run_code.clicked.connect(self._run_code)
         runner_ctrl_bar.addWidget(self.btn_run_code)
 
         self.btn_stop_code = QPushButton("⏹️ 终止")
         self.btn_stop_code.setEnabled(False)
         self.btn_stop_code.setCursor(Qt.PointingHandCursor)
-        self.btn_stop_code.setStyleSheet("background: #dc2626; color: white; font-weight: bold; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+        self.btn_stop_code.setStyleSheet("background: #dc2626; color: white; font-weight: bold; border-radius: 4px; padding: 3px 6px; font-size: 11px;")
         self.btn_stop_code.clicked.connect(self._stop_code)
         runner_ctrl_bar.addWidget(self.btn_stop_code)
 
-        self.btn_clear_console = QPushButton("🧹 清空输出")
+        self.btn_clear_console = QPushButton("🧹 清空")
         self.btn_clear_console.setCursor(Qt.PointingHandCursor)
-        self.btn_clear_console.setStyleSheet("padding: 4px 8px; font-size: 11px;")
+        self.btn_clear_console.setStyleSheet("padding: 3px 6px; font-size: 11px;")
         self.btn_clear_console.clicked.connect(self._clear_console)
         runner_ctrl_bar.addWidget(self.btn_clear_console)
 
-        self.btn_feedback_result = QPushButton("💬 将执行结果发给 AI 继续分析")
+        self.btn_feedback_result = QPushButton("💬 发送结果给 AI")
         self.btn_feedback_result.setCursor(Qt.PointingHandCursor)
-        self.btn_feedback_result.setStyleSheet("background: #0284c7; color: white; font-weight: bold; border-radius: 4px; padding: 4px 10px; font-size: 11px;")
+        self.btn_feedback_result.setStyleSheet("background: #0284c7; color: white; font-weight: bold; border-radius: 4px; padding: 3px 8px; font-size: 11px;")
         self.btn_feedback_result.clicked.connect(self._feedback_run_result_to_ai)
         runner_ctrl_bar.addWidget(self.btn_feedback_result)
 
         runner_ctrl_bar.addStretch()
 
-        self.lbl_runner_status = QLabel("就绪 (可直接编辑并执行 Python 爬虫脚本)")
+        self.lbl_runner_status = QLabel("就绪")
         self.lbl_runner_status.setStyleSheet("color: #64748b; font-size: 11px;")
+        self.lbl_runner_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         runner_ctrl_bar.addWidget(self.lbl_runner_status)
 
         runner_layout.addLayout(runner_ctrl_bar)
@@ -939,7 +973,7 @@ class CDPMonitorApp(QMainWindow):
                 font-family: 'Consolas', 'Courier New', monospace;
             }
         """)
-        self.code_edit.setPlaceholderText("# 在此编辑或查看 Python 代码，AI 生成的代码块会自动提取至此处...\n# 点击上方「▶️ 运行代码」可直接执行并查看返回结果")
+        self.code_edit.setPlaceholderText("# 在此编辑或查看 Python 代码，AI 生成的代码块会自动提取至此处...\n# 点击上方「▶️ 运行」可直接执行并查看返回结果")
         self.runner_tabs.addTab(self.code_edit, "💻 Python 待执行脚本")
 
         # Tab 2: 控制台输出
@@ -956,7 +990,7 @@ class CDPMonitorApp(QMainWindow):
                 font-family: 'Consolas', 'Courier New', monospace;
             }
         """)
-        self.code_console.setPlaceholderText("终端就绪... 点击「▶️ 运行代码」后在此实时输出 stdout 和 stderr 信息。")
+        self.code_console.setPlaceholderText("终端就绪... 点击「▶️ 运行」后在此实时输出 stdout 和 stderr 信息。")
         self.runner_tabs.addTab(self.code_console, "📟 终端执行结果 (Console)")
 
         runner_layout.addWidget(self.runner_tabs)
@@ -966,53 +1000,56 @@ class CDPMonitorApp(QMainWindow):
         ai_v_splitter.setStretchFactor(1, 4) # 代码运行器 45%
         ai_layout.addWidget(ai_v_splitter, 1)
 
-        # 3. 快捷提问灵感标签 (Chips) - 点击自动填入输入框，用户可随时直接发送或编辑
+        # 3. 快捷提问灵感模版 (下拉模版 + 快速药丸小按钮，支持任意缩放宽度)
         chips_layout = QHBoxLayout()
-        chips_layout.setSpacing(6)
-        chips_layout.addWidget(QLabel("💡 快捷灵感:"))
+        chips_layout.setSpacing(4)
+        lbl_chip = QLabel("💡 快捷灵感:")
+        lbl_chip.setStyleSheet("font-size: 11px; color: #475569; font-weight: bold;")
+        chips_layout.addWidget(lbl_chip)
 
         chips = [
             ("🎯 挑出核心业务接口", "请帮我梳理当前捕获的流量，剔除埋点与监控，挑出真正有用的核心业务数据接口并说明各自用途。"),
-            ("🔬 深度剖析当前选中接口", "请帮我深度剖析当前选中的这个接口：它的业务用途、关键参数、以及返回值 JSON 的具体数据字段路径。"),
-            ("🐍 生成 Python 爬取代码", "针对当前选中的接口，请帮我编写一份完整的 Python requests 脚本，包含必要请求头与核心字段提取代码。"),
+            ("🔬 深度剖析当前接口", "请帮我深度剖析当前选中的这个接口：它的业务用途、关键参数、以及返回值 JSON 的具体数据字段路径。"),
+            ("🐍 生成 Python 爬虫代码", "针对当前选中的接口，请帮我编写一份完整的 Python requests 脚本，包含必要请求头与核心字段提取代码。"),
             ("🔐 解释防刷/签名参数", "当前选中的接口有哪些防刷或加密签名参数（如 a_bogus 等）？如果不传或伪造会发生什么？"),
             ("📊 提取返回值字段结构", "请将当前选中的接口返回值进行树状解析，指出核心列表在哪里、标题在哪里、播放或下载地址在哪个字段。"),
         ]
 
+        self.combo_prompt_templates = QComboBox()
+        self.combo_prompt_templates.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.combo_prompt_templates.addItem("✨ 选择提问模版直接填入...", "")
         for label, prompt_text in chips:
-            btn = QPushButton(label)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #f1f5f9;
-                    border: 1px solid #cbd5e1;
-                    border-radius: 12px;
-                    padding: 3px 10px;
-                    font-size: 11px;
-                    color: #334155;
-                }
-                QPushButton:hover {
-                    background-color: #e2e8f0;
-                    color: #1e293b;
-                }
-            """)
-            btn.clicked.connect(lambda checked=False, p=prompt_text: self._on_chip_clicked(p))
-            chips_layout.addWidget(btn)
+            self.combo_prompt_templates.addItem(label, prompt_text)
+        self.combo_prompt_templates.currentIndexChanged.connect(self._on_prompt_template_selected)
+        chips_layout.addWidget(self.combo_prompt_templates, 1)
 
-        chips_layout.addStretch()
+        # 常用快捷微型按钮
+        btn_chip_core = QPushButton("🎯 挑核心")
+        btn_chip_core.setCursor(Qt.PointingHandCursor)
+        btn_chip_core.setStyleSheet("background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 4px; padding: 2px 6px; font-size: 11px;")
+        btn_chip_core.clicked.connect(lambda: self._on_chip_clicked(chips[0][1]))
+        chips_layout.addWidget(btn_chip_core)
+
+        btn_chip_code = QPushButton("🐍 写代码")
+        btn_chip_code.setCursor(Qt.PointingHandCursor)
+        btn_chip_code.setStyleSheet("background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 4px; padding: 2px 6px; font-size: 11px;")
+        btn_chip_code.clicked.connect(lambda: self._on_chip_clicked(chips[2][1]))
+        chips_layout.addWidget(btn_chip_code)
+
         ai_layout.addLayout(chips_layout)
 
         # 4. 对话输入框与发送按钮
         input_box_layout = QHBoxLayout()
-        input_box_layout.setSpacing(8)
+        input_box_layout.setSpacing(6)
 
         self.chat_input = ChatTextEdit()
-        self.chat_input.setFixedHeight(56)
-        self.chat_input.setPlaceholderText("在此输入你想与 AI 交流的问题... 支持探讨接口、解析字段、编写爬虫代码等 (Enter 发送，Shift+Enter 换行)")
+        self.chat_input.setFixedHeight(54)
+        self.chat_input.setPlaceholderText("在此输入与 AI 交流的问题... 支持探讨接口、解析字段、编写爬虫代码等 (Enter 发送，Shift+Enter 换行)")
         self.chat_input.send_requested.connect(self._send_chat_message)
         input_box_layout.addWidget(self.chat_input, 1)
 
         self.btn_send = QPushButton("🚀 发送\n(Enter)")
-        self.btn_send.setFixedSize(85, 56)
+        self.btn_send.setFixedSize(72, 54)
         self.btn_send.setStyleSheet("""
             QPushButton {
                 background-color: #2563eb;
@@ -1040,6 +1077,7 @@ class CDPMonitorApp(QMainWindow):
         main_h_splitter.addWidget(ai_group)
         main_h_splitter.setStretchFactor(0, 11)
         main_h_splitter.setStretchFactor(1, 9)
+        main_h_splitter.setSizes([750, 650])
 
         root_layout.addWidget(main_h_splitter, 1)
 
@@ -1104,6 +1142,27 @@ class CDPMonitorApp(QMainWindow):
             }
             QPushButton:pressed {
                 background-color: #cbd5e1;
+            }
+            QSplitter::handle {
+                background-color: #cbd5e1;
+            }
+            QSplitter::handle:horizontal {
+                width: 6px;
+                border-left: 1px solid #94a3b8;
+                border-right: 1px solid #94a3b8;
+            }
+            QSplitter::handle:horizontal:hover {
+                background-color: #2563eb;
+                border-color: #1d4ed8;
+            }
+            QSplitter::handle:vertical {
+                height: 6px;
+                border-top: 1px solid #94a3b8;
+                border-bottom: 1px solid #94a3b8;
+            }
+            QSplitter::handle:vertical:hover {
+                background-color: #2563eb;
+                border-color: #1d4ed8;
             }
         """)
 
@@ -1184,14 +1243,25 @@ class CDPMonitorApp(QMainWindow):
         self.req_table.setItem(row, 1, QTableWidgetItem(str(row + 1)))
 
         # Col 2: 状态
-        status_item = QTableWidgetItem("...")
-        status_item.setForeground(QColor("#f59e0b"))
+        if getattr(req, "is_websocket", False):
+            status_item = QTableWidgetItem("101 (WS)")
+            status_item.setForeground(QColor("#7e22ce"))
+            status_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+        else:
+            status_item = QTableWidgetItem("...")
+            status_item.setForeground(QColor("#f59e0b"))
         self.req_table.setItem(row, 2, status_item)
 
         # Col 3: 方法
-        method_item = QTableWidgetItem(req.method)
-        if is_useful_request(req):
-            method_item.setForeground(QColor("#2563eb"))
+        if getattr(req, "is_websocket", False):
+            method_item = QTableWidgetItem("📡 WS")
+            method_item.setForeground(QColor("#7e22ce"))
+            method_item.setBackground(QColor("#faf5ff"))
+            method_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+        else:
+            method_item = QTableWidgetItem(req.method)
+            if is_useful_request(req):
+                method_item.setForeground(QColor("#2563eb"))
         self.req_table.setItem(row, 3, method_item)
 
         # Col 4: 类型
@@ -1199,17 +1269,20 @@ class CDPMonitorApp(QMainWindow):
 
         # Col 5: URL
         url_item = QTableWidgetItem(req.url)
-        if is_useful_request(req):
+        if getattr(req, "is_websocket", False):
+            url_item.setToolTip("📡 WebSocket 双向消息流通道")
+        elif is_useful_request(req):
             url_item.setToolTip("⭐ 判定为核心业务数据接口 (非埋点/非静态)")
         self.req_table.setItem(row, 5, url_item)
 
         # Col 6: 大小
-        self.req_table.setItem(row, 6, QTableWidgetItem("-"))
+        self.req_table.setItem(row, 6, QTableWidgetItem(req.formatted_size if getattr(req, "is_websocket", False) else "-"))
 
         # Col 7: 时间
         self.req_table.setItem(row, 7, QTableWidgetItem(req.time_str))
 
         self._check_row_visibility(row, req)
+        self._update_ws_filter_btn_label()
         if hasattr(self, "lbl_table_stats"):
             total = len(self.requests)
             useful = sum(1 for r in self.requests if is_useful_request(r))
@@ -1343,13 +1416,16 @@ class CDPMonitorApp(QMainWindow):
             self.ws_table.setRowCount(0)
             for f in req.ws_frames:
                 self._append_ws_frame_row(f)
-            self.lbl_selected_frame_info.setText(f"当前长连接累计捕获 {len(req.ws_frames)} 帧消息")
+            cnt = len(req.ws_frames)
+            self.lbl_selected_frame_info.setText(f"当前长连接累计捕获 {cnt} 帧消息")
             self.txt_ws_frame_detail.setText("请在上方表格中选择一条消息帧以查看完整的 Payload 内容...")
+            self.detail_tabs.setTabText(5, f"📡 WebSocket 消息帧 ({cnt} 帧)")
             self.detail_tabs.setCurrentIndex(5)
         else:
             self.ws_table.setRowCount(0)
             self.lbl_selected_frame_info.setText("当前为普通 HTTP 请求 (无 WS 数据帧)")
-            self.txt_ws_frame_detail.setText("当前选中的是常规 HTTP/HTTPS 请求。\n如需查看实时双向数据帧，请在左侧列表中点击类型为 WebSocket 的接口。")
+            self.txt_ws_frame_detail.setText("当前选中的是常规 HTTP/HTTPS 请求。\n如需查看实时双向数据帧，请在上方列表中点击类型为 WebSocket 的接口。")
+            self.detail_tabs.setTabText(5, "📡 WebSocket 消息帧")
 
     def _request_response_body(self):
         if not self.selected_request:
@@ -1368,15 +1444,20 @@ class CDPMonitorApp(QMainWindow):
             if req:
                 cnt = len(req.ws_frames)
                 status_item = QTableWidgetItem(f"101 ({cnt} 帧)")
-                status_item.setForeground(QColor("#0284c7"))
+                status_item.setForeground(QColor("#7e22ce"))
+                status_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
                 self.req_table.setItem(row, 2, status_item)
                 self.req_table.setItem(row, 6, QTableWidgetItem(req.formatted_size))
+
+        self._update_ws_filter_btn_label()
 
         # 2. 如果右侧详情正在查看该 WebSocket 请求，实时向 WS 帧表格追加行
         if self.selected_request and self.selected_request.request_id == req_id:
             self._append_ws_frame_row(frame)
+            cnt = len(self.selected_request.ws_frames)
             if hasattr(self, "lbl_selected_frame_info"):
-                self.lbl_selected_frame_info.setText(f"当前长连接累计捕获 {len(self.selected_request.ws_frames)} 帧消息")
+                self.lbl_selected_frame_info.setText(f"当前长连接累计捕获 {cnt} 帧消息")
+            self.detail_tabs.setTabText(5, f"📡 WebSocket 消息帧 ({cnt} 帧)")
 
     def _on_ws_closed(self, req_id: str):
         if req_id in self.req_id_to_row:
@@ -1505,9 +1586,42 @@ class CDPMonitorApp(QMainWindow):
     def _on_useful_filter_toggled(self, checked: bool):
         if checked:
             self.btn_filter_useful.setText("✅ 正在筛选: 仅看有用数据接口")
+            if hasattr(self, "btn_filter_ws") and self.btn_filter_ws.isChecked():
+                self.btn_filter_ws.blockSignals(True)
+                self.btn_filter_ws.setChecked(False)
+                self.btn_filter_ws.blockSignals(False)
+                self._update_ws_filter_btn_label()
         else:
             self.btn_filter_useful.setText("⭐ 仅看有用数据接口")
         self._apply_table_filters()
+
+    def _on_ws_filter_toggled(self, checked: bool):
+        if checked:
+            if hasattr(self, "btn_filter_useful") and self.btn_filter_useful.isChecked():
+                self.btn_filter_useful.blockSignals(True)
+                self.btn_filter_useful.setChecked(False)
+                self.btn_filter_useful.setText("⭐ 仅看有用数据接口")
+                self.btn_filter_useful.blockSignals(False)
+        self._update_ws_filter_btn_label()
+        self._apply_table_filters()
+
+    def _update_ws_filter_btn_label(self):
+        if hasattr(self, "btn_filter_ws"):
+            ws_cnt = sum(1 for r in self.requests if getattr(r, "is_websocket", False) or r.resource_type.lower() == "websocket" or r.url.startswith(("ws://", "wss://")))
+            if self.btn_filter_ws.isChecked():
+                self.btn_filter_ws.setText(f"✅ 正在筛选: WebSocket ({ws_cnt})")
+            else:
+                self.btn_filter_ws.setText(f"📡 仅看 WebSocket ({ws_cnt})")
+
+    def _on_prompt_template_selected(self, index: int):
+        if index <= 0:
+            return
+        prompt_text = self.combo_prompt_templates.itemData(index)
+        if prompt_text:
+            self._on_chip_clicked(prompt_text)
+        self.combo_prompt_templates.blockSignals(True)
+        self.combo_prompt_templates.setCurrentIndex(0)
+        self.combo_prompt_templates.blockSignals(False)
 
     def _ai_identify_useful_apis(self):
         """让 AI 深度分析当前网络流量并挑出核心业务接口"""
@@ -1544,6 +1658,7 @@ class CDPMonitorApp(QMainWindow):
         if hasattr(self, "lbl_table_stats"):
             filter_active = (
                 (getattr(self, "btn_filter_useful", None) and self.btn_filter_useful.isChecked())
+                or (getattr(self, "btn_filter_ws", None) and self.btn_filter_ws.isChecked())
                 or bool(keyword)
                 or bool(url_query)
                 or filter_type != "全部"
@@ -1576,6 +1691,13 @@ class CDPMonitorApp(QMainWindow):
         # 2. 仅看核心/有用数据接口
         if hasattr(self, "btn_filter_useful") and self.btn_filter_useful.isChecked():
             if not is_useful_request(req):
+                self.req_table.setRowHidden(row, True)
+                return
+
+        # 2.1 仅看 WebSocket 长连接
+        if hasattr(self, "btn_filter_ws") and self.btn_filter_ws.isChecked():
+            is_ws = getattr(req, "is_websocket", False) or req.resource_type.lower() == "websocket" or req.url.startswith(("ws://", "wss://"))
+            if not is_ws:
                 self.req_table.setRowHidden(row, True)
                 return
 
@@ -1629,6 +1751,9 @@ class CDPMonitorApp(QMainWindow):
             self.txt_ws_frame_detail.clear()
         if hasattr(self, "lbl_table_stats"):
             self.lbl_table_stats.setText("共 0 条")
+        self._update_ws_filter_btn_label()
+        if hasattr(self, "detail_tabs"):
+            self.detail_tabs.setTabText(5, "📡 WebSocket 消息帧")
         self._update_context_label()
         self.status_bar.showMessage("已清空请求列表")
 
