@@ -297,15 +297,25 @@ class CDPMonitorApp(QMainWindow):
         QTimer.singleShot(300, self._refresh_targets)
 
     def _load_config(self):
+        # 1. 加载公共默认配置
         try:
             with open("config.json", "r", encoding="utf-8") as f:
                 self.config.update(json.load(f))
         except Exception:
             pass
 
-    def _save_config(self):
+        # 2. 覆盖加载本地私有配置 config.local.json (被 .gitignore 忽略，安全防泄漏)
         try:
-            with open("config.json", "w", encoding="utf-8") as f:
+            with open("config.local.json", "r", encoding="utf-8") as f:
+                self.config.update(json.load(f))
+        except Exception:
+            pass
+
+    def _save_config(self):
+        # 若存在本地私有配置则优先保存到 config.local.json，避免将私密信息写回公开的 config.json
+        target_file = "config.local.json" if os.path.exists("config.local.json") else "config.json"
+        try:
+            with open(target_file, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"保存配置失败: {e}")

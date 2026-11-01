@@ -149,18 +149,22 @@ python main.py
 - **AI API Key**：你的 API 密钥
 - **AI 模型名称**：如 `gpt-4o-mini`、`deepseek-chat` 或本地模型名称
 
-### 方式二：编辑 `config.json`
-在项目根目录下创建或编辑 `config.json`（可参考 `config.example.json`）：
+### 方式二：使用本地私有配置文件 `config.local.json`（推荐，永久防泄露）
+项目默认支持并在 `.gitignore` 中屏蔽了 `config.local.json`。你只需在根目录创建 `config.local.json`：
 ```json
 {
   "cdp_url": "http://127.0.0.1:9222/json",
-  "ai_base_url": "https://api.deepseek.com/v1",
-  "ai_api_key": "sk-your-deepseek-key",
-  "ai_model": "deepseek-chat"
+  "ai_base_url": "http://your-private-ip:8000/v1",
+  "ai_api_key": "your-key",
+  "ai_model": "your-model"
 }
 ```
+程序启动时会自动优先读取它，即便你执行 `git commit` 或 `git push`，私有配置也绝不会被推送到 GitHub！
 
-### 方式三：环境变量（云原生/自动化运行）
+### 方式三：编辑通用 `config.json`
+在项目根目录编辑公开配置文件 `config.json`（注意不要在此文件中直接提交个人私有服务器 IP 或敏感 Token）。
+
+### 方式四：环境变量（云原生/自动化运行）
 支持标准 OpenAI 环境变量：
 ```bash
 export OPENAI_BASE_URL="https://api.openai.com/v1"

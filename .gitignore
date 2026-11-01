@@ -34,6 +34,8 @@ venv.bak/
 .env
 .env.local
 .env.*.local
+config.local.json
+*.local.json
 
 # PyInstaller
 *.manifest
