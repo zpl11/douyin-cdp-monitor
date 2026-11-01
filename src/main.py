@@ -46,7 +46,7 @@ from .ai_analyzer import (
     markdown_to_qt_html,
 )
 from .cdp import CDPClient, discover_targets
-from .models import BrowserTab, NetworkRequest
+from .models import BrowserTab, NetworkRequest, WebSocketFrame
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -66,6 +66,8 @@ class CDPRunner(QThread):
     sig_loading_finished = Signal(str, int)
     sig_loading_failed = Signal(str, str)
     sig_body_ready = Signal(str, str, bool)
+    sig_ws_frame_added = Signal(str, object)
+    sig_ws_closed = Signal(str)
 
     def __init__(self, cdp_url: str):
         super().__init__()
@@ -211,6 +213,98 @@ class CDPRunner(QThread):
                 self.requests_map[req_id].error = err
             self.sig_loading_failed.emit(req_id, err)
 
+        # ── WebSocket 专属协议事件 ──────────────────────────────────────────────
+        elif method == "Network.webSocketCreated":
+            req_id = params.get("requestId", "")
+            url = params.get("url", "")
+            record = NetworkRequest(
+                request_id=req_id,
+                timestamp=datetime.now(),
+                method="WS",
+                url=url,
+                resource_type="WebSocket",
+                is_websocket=True,
+                response_status=101,
+                response_status_text="Connecting",
+                tab_title=self.client.active_tab.title if self.client.active_tab else "",
+                tab_url=self.client.active_tab.url if self.client.active_tab else "",
+            )
+            self.requests_map[req_id] = record
+            self.sig_request_added.emit(record)
+
+        elif method == "Network.webSocketWillSendHandshakeRequest":
+            req_id = params.get("requestId", "")
+            req_data = params.get("request", {})
+            headers = req_data.get("headers", {})
+            if req_id in self.requests_map:
+                self.requests_map[req_id].headers.update(headers)
+
+        elif method == "Network.webSocketHandshakeResponseReceived":
+            req_id = params.get("requestId", "")
+            resp_data = params.get("response", {})
+            status = resp_data.get("status", 101)
+            status_text = resp_data.get("statusText", "Switching Protocols")
+            headers = resp_data.get("headers", {})
+            if req_id in self.requests_map:
+                r = self.requests_map[req_id]
+                r.response_status = status
+                r.response_status_text = status_text
+                r.response_headers.update(headers)
+            self.sig_response_received.emit(req_id, status, status_text, headers, "websocket")
+
+        elif method == "Network.webSocketFrameSent":
+            req_id = params.get("requestId", "")
+            frame_resp = params.get("response", {})
+            payload = frame_resp.get("payloadData", "")
+            opcode = frame_resp.get("opcode", 1)
+            if req_id in self.requests_map:
+                r = self.requests_map[req_id]
+                size = len(payload.encode("utf-8", errors="ignore"))
+                frame = WebSocketFrame(
+                    frame_id=len(r.ws_frames) + 1,
+                    timestamp=datetime.now(),
+                    direction="send",
+                    payload_data=payload,
+                    opcode=opcode,
+                    size=size
+                )
+                r.ws_frames.append(frame)
+                r.response_size += size
+                self.sig_ws_frame_added.emit(req_id, frame)
+
+        elif method == "Network.webSocketFrameReceived":
+            req_id = params.get("requestId", "")
+            frame_resp = params.get("response", {})
+            payload = frame_resp.get("payloadData", "")
+            opcode = frame_resp.get("opcode", 1)
+            if req_id in self.requests_map:
+                r = self.requests_map[req_id]
+                size = len(payload.encode("utf-8", errors="ignore"))
+                frame = WebSocketFrame(
+                    frame_id=len(r.ws_frames) + 1,
+                    timestamp=datetime.now(),
+                    direction="recv",
+                    payload_data=payload,
+                    opcode=opcode,
+                    size=size
+                )
+                r.ws_frames.append(frame)
+                r.response_size += size
+                self.sig_ws_frame_added.emit(req_id, frame)
+
+        elif method == "Network.webSocketClosed":
+            req_id = params.get("requestId", "")
+            if req_id in self.requests_map:
+                self.requests_map[req_id].response_status_text = "Closed"
+            self.sig_ws_closed.emit(req_id)
+
+        elif method == "Network.webSocketFrameError":
+            req_id = params.get("requestId", "")
+            err_msg = params.get("errorMessage", "WebSocket Frame Error")
+            if req_id in self.requests_map:
+                self.requests_map[req_id].error = err_msg
+            self.sig_loading_failed.emit(req_id, err_msg)
+
 
 # ── 聊天输入与 AI 工作线程 ──────────────────────────────────────────────────────
 
@@ -288,6 +382,8 @@ class CDPMonitorApp(QMainWindow):
         self.cdp_runner.sig_loading_finished.connect(self._on_loading_finished)
         self.cdp_runner.sig_loading_failed.connect(self._on_loading_failed)
         self.cdp_runner.sig_body_ready.connect(self._on_body_ready)
+        self.cdp_runner.sig_ws_frame_added.connect(self._on_ws_frame_added)
+        self.cdp_runner.sig_ws_closed.connect(self._on_ws_closed)
         self.cdp_runner.start()
 
         self._setup_ui()
@@ -381,7 +477,7 @@ class CDPMonitorApp(QMainWindow):
 
         filter_bar.addWidget(QLabel("类型:"))
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["全部", "仅 XHR / Fetch", "Document", "Script", "Image", "其它"])
+        self.filter_combo.addItems(["全部", "仅 XHR / Fetch", "WebSocket", "Document", "Script", "Image", "其它"])
         self.filter_combo.currentIndexChanged.connect(self._apply_table_filters)
         filter_bar.addWidget(self.filter_combo)
 
@@ -571,6 +667,89 @@ class CDPMonitorApp(QMainWindow):
         self.txt_resp_body.setReadOnly(True)
         resp_body_layout.addWidget(self.txt_resp_body)
         self.detail_tabs.addTab(resp_body_widget, "响应体 (Body)")
+
+        # Tab 6: WebSocket Frames (双向消息帧实时透视)
+        ws_widget = QWidget()
+        ws_layout = QVBoxLayout(ws_widget)
+        ws_layout.setContentsMargins(6, 6, 6, 6)
+        ws_layout.setSpacing(6)
+
+        # 顶部操作与筛选栏
+        ws_toolbar = QHBoxLayout()
+        ws_toolbar.setSpacing(6)
+
+        ws_toolbar.addWidget(QLabel("方向:"))
+        self.ws_dir_combo = QComboBox()
+        self.ws_dir_combo.addItems(["全部", "🟢 仅客户端发送 (Send)", "🔵 仅服务端推送 (Recv)"])
+        self.ws_dir_combo.currentIndexChanged.connect(self._apply_ws_frame_filter)
+        ws_toolbar.addWidget(self.ws_dir_combo)
+
+        ws_toolbar.addWidget(QLabel("过滤 Payload:"))
+        self.ws_search_input = QLineEdit()
+        self.ws_search_input.setPlaceholderText("过滤帧内容关键字...")
+        self.ws_search_input.textChanged.connect(self._apply_ws_frame_filter)
+        ws_toolbar.addWidget(self.ws_search_input, 1)
+
+        self.chk_ws_autoscroll = QCheckBox("自动滚到底部")
+        self.chk_ws_autoscroll.setChecked(True)
+        ws_toolbar.addWidget(self.chk_ws_autoscroll)
+
+        self.btn_ws_send_to_ai = QPushButton("🤖 送入 AI 分析帧序列")
+        self.btn_ws_send_to_ai.setStyleSheet("background: #0284c7; color: white; font-weight: bold; padding: 4px 10px; border-radius: 4px;")
+        self.btn_ws_send_to_ai.clicked.connect(self._send_ws_to_ai)
+        ws_toolbar.addWidget(self.btn_ws_send_to_ai)
+
+        ws_layout.addLayout(ws_toolbar)
+
+        # 帧列表与单帧 Payload 分割器
+        ws_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # 上方：帧列表表格
+        self.ws_table = QTableWidget()
+        self.ws_table.setColumnCount(5)
+        self.ws_table.setHorizontalHeaderLabels(["#", "方向", "时间", "大小", "数据摘要 (Payload Preview)"])
+        self.ws_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.ws_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.ws_table.setColumnWidth(0, 45)
+        self.ws_table.setColumnWidth(1, 80)
+        self.ws_table.setColumnWidth(2, 90)
+        self.ws_table.setColumnWidth(3, 70)
+        self.ws_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.ws_table.itemSelectionChanged.connect(self._on_ws_frame_selected)
+        ws_splitter.addWidget(self.ws_table)
+
+        # 下方：单帧完整内容展示
+        frame_detail_widget = QWidget()
+        frame_detail_layout = QVBoxLayout(frame_detail_widget)
+        frame_detail_layout.setContentsMargins(0, 0, 0, 0)
+        frame_detail_layout.setSpacing(4)
+
+        frame_detail_toolbar = QHBoxLayout()
+        self.lbl_selected_frame_info = QLabel("选中帧详情: 未选择")
+        self.lbl_selected_frame_info.setStyleSheet("font-size: 11px; color: #475569; font-weight: bold;")
+        frame_detail_toolbar.addWidget(self.lbl_selected_frame_info, 1)
+
+        self.btn_format_frame_json = QPushButton("⚡ JSON 格式化")
+        self.btn_format_frame_json.clicked.connect(self._format_selected_ws_payload)
+        frame_detail_toolbar.addWidget(self.btn_format_frame_json)
+
+        self.btn_copy_frame_payload = QPushButton("📋 复制 Payload")
+        self.btn_copy_frame_payload.clicked.connect(self._copy_selected_ws_payload)
+        frame_detail_toolbar.addWidget(self.btn_copy_frame_payload)
+
+        frame_detail_layout.addLayout(frame_detail_toolbar)
+
+        self.txt_ws_frame_detail = QTextEdit()
+        self.txt_ws_frame_detail.setReadOnly(True)
+        self.txt_ws_frame_detail.setPlaceholderText("选择上方一条消息帧以查看完整 Payload 数据 (支持 JSON / Protobuf 诊断)...")
+        frame_detail_layout.addWidget(self.txt_ws_frame_detail)
+
+        ws_splitter.addWidget(frame_detail_widget)
+        ws_splitter.setStretchFactor(0, 3)
+        ws_splitter.setStretchFactor(1, 2)
+
+        ws_layout.addWidget(ws_splitter)
+        self.detail_tabs.addTab(ws_widget, "WS 消息帧 (Frames)")
 
         detail_layout.addWidget(self.detail_tabs)
         upper_h_splitter.addWidget(detail_group)
@@ -987,12 +1166,167 @@ class CDPMonitorApp(QMainWindow):
         else:
             self.txt_resp_body.setText("点击上方「📥 获取/刷新响应体」拉取完整 Response Body 数据...")
 
+        # 6. WebSocket 消息帧 Tab 联动
+        if getattr(req, "is_websocket", False):
+            self.ws_table.setRowCount(0)
+            for f in req.ws_frames:
+                self._append_ws_frame_row(f)
+            self.lbl_selected_frame_info.setText(f"当前长连接累计捕获 {len(req.ws_frames)} 帧消息")
+            self.txt_ws_frame_detail.setText("请在上方表格中选择一条消息帧以查看完整的 Payload 内容...")
+            self.detail_tabs.setCurrentIndex(5)
+        else:
+            self.ws_table.setRowCount(0)
+            self.lbl_selected_frame_info.setText("当前为普通 HTTP 请求 (无 WS 数据帧)")
+            self.txt_ws_frame_detail.setText("当前选中的是常规 HTTP/HTTPS 请求。\n如需查看实时双向数据帧，请在左侧列表中点击类型为 WebSocket 的接口。")
+
     def _request_response_body(self):
         if not self.selected_request:
             QMessageBox.information(self, "提示", "请先在表格中选择一个请求！")
             return
         self.txt_resp_body.setText("正在通过 CDP Network.getResponseBody 读取响应体...")
         self.cdp_runner.fetch_response_body(self.selected_request.request_id)
+
+    # ── WebSocket 消息帧交互槽函数 ──────────────────────────────────────────
+
+    def _on_ws_frame_added(self, req_id: str, frame: WebSocketFrame):
+        # 1. 更新主请求表格的状态与大小
+        if req_id in self.req_id_to_row:
+            row = self.req_id_to_row[req_id]
+            req = self.cdp_runner.requests_map.get(req_id)
+            if req:
+                cnt = len(req.ws_frames)
+                status_item = QTableWidgetItem(f"101 ({cnt} 帧)")
+                status_item.setForeground(QColor("#0284c7"))
+                self.req_table.setItem(row, 2, status_item)
+                self.req_table.setItem(row, 6, QTableWidgetItem(req.formatted_size))
+
+        # 2. 如果右侧详情正在查看该 WebSocket 请求，实时向 WS 帧表格追加行
+        if self.selected_request and self.selected_request.request_id == req_id:
+            self._append_ws_frame_row(frame)
+            if hasattr(self, "lbl_selected_frame_info"):
+                self.lbl_selected_frame_info.setText(f"当前长连接累计捕获 {len(self.selected_request.ws_frames)} 帧消息")
+
+    def _on_ws_closed(self, req_id: str):
+        if req_id in self.req_id_to_row:
+            row = self.req_id_to_row[req_id]
+            req = self.cdp_runner.requests_map.get(req_id)
+            cnt = len(req.ws_frames) if req else 0
+            status_item = QTableWidgetItem(f"Closed ({cnt} 帧)")
+            status_item.setForeground(QColor("#64748b"))
+            self.req_table.setItem(row, 2, status_item)
+
+    def _append_ws_frame_row(self, frame: WebSocketFrame):
+        direction_filter = self.ws_dir_combo.currentText()
+        keyword = self.ws_search_input.text().strip().lower()
+
+        if "仅客户端发送" in direction_filter and frame.direction != "send":
+            return
+        if "仅服务端推送" in direction_filter and frame.direction != "recv":
+            return
+        if keyword and keyword not in frame.payload_data.lower():
+            return
+
+        row = self.ws_table.rowCount()
+        self.ws_table.insertRow(row)
+
+        # Col 0: #
+        self.ws_table.setItem(row, 0, QTableWidgetItem(str(frame.frame_id)))
+
+        # Col 1: 方向
+        if frame.direction == "send":
+            dir_item = QTableWidgetItem("🟢 发送")
+            dir_item.setForeground(QColor("#16a34a"))
+        else:
+            dir_item = QTableWidgetItem("🔵 接收")
+            dir_item.setForeground(QColor("#0284c7"))
+        self.ws_table.setItem(row, 1, dir_item)
+
+        # Col 2: 时间
+        self.ws_table.setItem(row, 2, QTableWidgetItem(frame.time_str))
+
+        # Col 3: 大小
+        self.ws_table.setItem(row, 3, QTableWidgetItem(f"{frame.size} B"))
+
+        # Col 4: 摘要
+        preview = frame.payload_data.replace("\r", " ").replace("\n", " ").strip()
+        if len(preview) > 160:
+            preview = preview[:160] + "..."
+        summary_item = QTableWidgetItem(preview)
+        summary_item.setData(Qt.ItemDataRole.UserRole, frame)
+        self.ws_table.setItem(row, 4, summary_item)
+
+        if hasattr(self, "chk_ws_autoscroll") and self.chk_ws_autoscroll.isChecked():
+            self.ws_table.scrollToBottom()
+
+    def _on_ws_frame_selected(self):
+        items = self.ws_table.selectedItems()
+        if not items:
+            return
+        row = items[0].row()
+        summary_item = self.ws_table.item(row, 4)
+        if not summary_item:
+            return
+        frame: Optional[WebSocketFrame] = summary_item.data(Qt.ItemDataRole.UserRole)
+        if not frame:
+            return
+
+        direction_label = "🟢 客户端发往服务端 (Send)" if frame.direction == "send" else "🔵 服务端推送给客户端 (Recv)"
+        self.lbl_selected_frame_info.setText(
+            f"帧 #{frame.frame_id} | {direction_label} | {frame.opcode_str} | 大小: {frame.size} 字节 | 时间: {frame.time_str}"
+        )
+
+        raw_text = frame.payload_data
+        try:
+            parsed = json.loads(raw_text)
+            formatted = json.dumps(parsed, indent=2, ensure_ascii=False)
+            self.txt_ws_frame_detail.setText(formatted)
+        except Exception:
+            self.txt_ws_frame_detail.setText(raw_text)
+
+    def _format_selected_ws_payload(self):
+        text = self.txt_ws_frame_detail.toPlainText().strip()
+        if not text:
+            return
+        try:
+            parsed = json.loads(text)
+            self.txt_ws_frame_detail.setText(json.dumps(parsed, indent=2, ensure_ascii=False))
+        except Exception as e:
+            QMessageBox.information(self, "提示", f"该 Payload 不是合法的 JSON 文本格式 (可能是二进制/Protobuf 数据): {e}")
+
+    def _copy_selected_ws_payload(self):
+        text = self.txt_ws_frame_detail.toPlainText()
+        if not text:
+            QMessageBox.information(self, "提示", "当前没有可复制的 Payload 内容！")
+            return
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(self, "已复制", "已成功复制该帧 Payload 到剪贴板！")
+
+    def _apply_ws_frame_filter(self):
+        if not self.selected_request or not getattr(self.selected_request, "is_websocket", False):
+            return
+        self.ws_table.setRowCount(0)
+        for frame in self.selected_request.ws_frames:
+            self._append_ws_frame_row(frame)
+
+    def _send_ws_to_ai(self):
+        if not self.selected_request:
+            QMessageBox.information(self, "提示", "请先在请求列表中选择一个 WebSocket 接口！")
+            return
+        if not getattr(self.selected_request, "is_websocket", False):
+            QMessageBox.information(self, "提示", "当前选择的不是 WebSocket 接口！请选择类型为 WebSocket 的请求。")
+            return
+
+        cnt = len(self.selected_request.ws_frames)
+        prompt = (
+            f"我正在逆向分析这个 WebSocket 长连接接口: `{self.selected_request.url}`。\n"
+            f"目前已捕获到 {cnt} 条双向交互帧。请帮我深入分析：\n"
+            f"1. 客户端发出的初始握手/鉴权/订阅包结构是什么？\n"
+            f"2. 服务端推送的数据包采用什么序列化协议（JSON / Protobuf 等）？字段有哪些含义？\n"
+            f"3. 它的心跳保活机制（Ping/Pong 频率与包体特征）是怎样的？\n"
+            f"4. 请给出用 Python `websockets` 库连接并持续监听接收解析消息的完整演示代码。"
+        )
+        self.chat_input.setText(prompt)
+        self._send_chat_message()
 
     # ── 过滤与导出 ────────────────────────────────────────────────────────────
 
@@ -1090,6 +1424,8 @@ class CDPMonitorApp(QMainWindow):
         # 4. 类型过滤
         if filter_type == "仅 XHR / Fetch":
             visible = req.is_xhr or req.resource_type.lower() in ("xhr", "fetch")
+        elif filter_type == "WebSocket":
+            visible = getattr(req, "is_websocket", False) or req.resource_type.lower() == "websocket" or req.url.startswith(("ws://", "wss://"))
         elif filter_type == "Document":
             visible = req.resource_type.lower() == "document"
         elif filter_type == "Script":
@@ -1097,7 +1433,7 @@ class CDPMonitorApp(QMainWindow):
         elif filter_type == "Image":
             visible = req.resource_type.lower() == "image"
         elif filter_type == "其它":
-            visible = req.resource_type.lower() not in ("xhr", "fetch", "document", "script", "image")
+            visible = req.resource_type.lower() not in ("xhr", "fetch", "document", "script", "image", "websocket") and not getattr(req, "is_websocket", False)
 
         # 5. 关键字过滤
         if visible and keyword:
@@ -1115,6 +1451,10 @@ class CDPMonitorApp(QMainWindow):
         self.txt_post.clear()
         self.txt_resp_headers.clear()
         self.txt_resp_body.clear()
+        if hasattr(self, "ws_table"):
+            self.ws_table.setRowCount(0)
+        if hasattr(self, "txt_ws_frame_detail"):
+            self.txt_ws_frame_detail.clear()
         if hasattr(self, "lbl_table_stats"):
             self.lbl_table_stats.setText("共 0 条")
         self._update_context_label()
@@ -1131,19 +1471,34 @@ class CDPMonitorApp(QMainWindow):
 
         data = []
         for r in self.requests:
-            data.append({
+            item_data = {
                 "request_id": r.request_id,
                 "timestamp": r.time_str,
                 "method": r.method,
                 "url": r.url,
                 "resource_type": r.resource_type,
+                "is_websocket": getattr(r, "is_websocket", False),
                 "headers": r.headers,
                 "post_data": r.post_data,
                 "response_status": r.response_status,
                 "response_headers": r.response_headers,
                 "response_size": r.response_size,
                 "response_body": r.response_body,
-            })
+            }
+            if getattr(r, "is_websocket", False) and r.ws_frames:
+                item_data["ws_frames"] = [
+                    {
+                        "frame_id": f.frame_id,
+                        "timestamp": f.time_str,
+                        "direction": f.direction,
+                        "opcode": f.opcode,
+                        "opcode_str": f.opcode_str,
+                        "size": f.size,
+                        "payload": f.payload_data,
+                    }
+                    for f in r.ws_frames
+                ]
+            data.append(item_data)
 
         try:
             with open(file_path, "w", encoding="utf-8") as f:

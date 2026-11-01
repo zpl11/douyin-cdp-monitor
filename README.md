@@ -28,7 +28,12 @@
 
 ## ✨ 核心特性 (Key Features)
 
-- ⚡ **原生 CDP 双向监听**：基于 `websockets` 与 `httpx`，毫秒级捕获 `Network.requestWillBeSent`、`Network.responseReceived`、`Network.loadingFinished` 及响应体。
+- ⚡ **原生 CDP 双向监听**：基于 `websockets` 与 `httpx`，毫秒级捕获 HTTP/HTTPS 请求与全量网络事件。
+- 📡 **深度 WebSocket 协议与消息帧透视**：
+  - 完整捕获 WebSocket 连接建立、握手 Header 及状态转换；
+  - 实时捕获每一条客户端**发送 (Send)** 与服务端**推送 (Recv)** 的原始数据帧（Frame Payload）；
+  - 配备专用 **「WS 消息帧 (Frames)」** 透视面板，支持按发送/接收方向筛选、关键字过滤、自动滚动与 JSON 自动格式化；
+  - 支持一键将捕获的双向 WS 消息帧序列送入 AI 对话框，智能解析直播间弹幕、即时私信、Protobuf/JSON 包体协议并生成 Python 监听脚本。
 - 📑 **多标签页智能感知**：自动发现 Chrome 中已开启的所有页面标签，支持一键热切换监听目标。
 - 🎯 **智能流量降噪与提纯**：
   - 支持 XHR、Fetch、WebSocket、JS、CSS、Doc、Image 等资源类型精准过滤；

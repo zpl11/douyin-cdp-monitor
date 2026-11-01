@@ -54,6 +54,10 @@ def is_useful_request(req: NetworkRequest) -> bool:
     if any(path.endswith(ext) for ext in STATIC_EXTENSIONS):
         return False
 
+    # 2.1 WebSocket 长连接直接认定为核心数据通道 (如直播间、弹幕、私信)
+    if getattr(req, "is_websocket", False) or req.resource_type.lower() == "websocket" or req.url.startswith(("ws://", "wss://")):
+        return True
+
     # 3. 资源类型必须属于 XHR/Fetch/Document，或者响应是 JSON
     is_xhr_type = req.is_xhr or req.resource_type.lower() in ("xhr", "fetch")
     is_json = "json" in req.mime_type.lower()
@@ -308,6 +312,20 @@ class AIAnalyzer:
                     post_show = r.post_data if len(r.post_data) <= max_post_chars else r.post_data[:max_post_chars] + f"\n... (POST 载荷已折叠至上限，原长: {len(r.post_data)} 字符)"
                     req_lines.append(f"- POST 载荷:\n```\n{post_show}\n```")
 
+                if getattr(r, "is_websocket", False) or getattr(r, "ws_frames", None):
+                    frames = getattr(r, "ws_frames", [])
+                    send_cnt = sum(1 for f in frames if f.direction == "send")
+                    recv_cnt = sum(1 for f in frames if f.direction == "recv")
+                    req_lines.append(f"- 📡 WebSocket 双向消息流 (累计 {len(frames)} 帧: 发送 {send_cnt} 帧, 接收 {recv_cnt} 帧):")
+                    # 取最近的最多 12 条关键帧时序
+                    recent_frames = frames[-12:] if len(frames) > 12 else frames
+                    for f in recent_frames:
+                        arrow = "➡️ [客户端发送 (SEND)]" if f.direction == "send" else "⬅️ [服务端推送 (RECV)]"
+                        p_str = f.payload_data
+                        if len(p_str) > 1000:
+                            p_str = p_str[:1000] + f"\n... (消息 Payload 较长已折叠，原长: {len(f.payload_data)} 字符)"
+                        req_lines.append(f"  * #{f.frame_id} `{f.time_str}` {arrow} {f.opcode_str} ({f.size} B):\n```\n{p_str}\n```")
+
                 if r.response_body:
                     is_raw_full = allow_raw and (len(r.response_body) <= per_req_budget)
                     if is_raw_full:
@@ -323,7 +341,7 @@ class AIAnalyzer:
                         )
                         body_tag = f"返回值 Response Body (⚡ 智能结构样本，保留深层对象与真实字段，折叠多余同构数组项以节省 Token):"
                     req_lines.append(f"- {body_tag}\n```json\n{body_content}\n```")
-                else:
+                elif not getattr(r, "is_websocket", False):
                     req_lines.append("- 返回值 Response Body: (该接口暂未读取到响应体或为空)")
 
                 sections.append("\n".join(req_lines))
