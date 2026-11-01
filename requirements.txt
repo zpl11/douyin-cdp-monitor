@@ -1,0 +1,12 @@
+# 网络通信
+websockets>=12.0
+httpx>=0.27
+
+# GUI
+PySide6>=6.7
+
+# AI
+openai>=1.30
+
+# 打包
+pyinstaller>=6.9
