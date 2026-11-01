@@ -1887,9 +1887,17 @@ class CDPMonitorApp(QMainWindow):
             f"【用户提问】: {user_text}"
         )
 
-        # 多轮会话历史防溢出控制：保留 System 提示与最近 4 轮消息 (8 条)
-        if len(self.chat_messages) > 9:
-            self.chat_messages = [self.chat_messages[0]] + self.chat_messages[-8:]
+        # 对历史记录中早先轮次的 user 消息执行快照瘦身，仅保留历史提问，剔除旧快照，防止上下文持续累加导致 502 Bad Gateway
+        for msg in self.chat_messages:
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if "【用户提问】:" in content:
+                    parts = content.split("【用户提问】:")
+                    msg["content"] = f"【历史提问】: {parts[-1].strip()}"
+
+        # 多轮会话历史防溢出控制：保留 System 提示与最近 3 轮消息 (6 条)
+        if len(self.chat_messages) > 7:
+            self.chat_messages = [self.chat_messages[0]] + self.chat_messages[-6:]
 
         self.chat_messages.append({"role": "user", "content": combined_content})
 
@@ -2110,11 +2118,21 @@ class CDPMonitorApp(QMainWindow):
 
     def _on_ai_chat_error(self, err: str):
         tip_html = ""
-        if "exceed" in err.lower() and "context" in err.lower():
+        err_lower = err.lower()
+        if "502" in err or "bad gateway" in err_lower:
+            tip_html = """
+            <div style="margin-top: 6px; font-size: 11.5px; color: #b91c1c; background-color: #fee2e2; padding: 6px; border-radius: 4px; line-height: 1.5;">
+                💡 <b>502 Bad Gateway 原因分析与排查建议</b>：<br/>
+                1. <b>大模型后端超时或显存超限</b>：私有部署模型在处理过长 Prompt（如数万字符的完整 HTML 网页源码）时，反向代理网关超时断开。<br/>
+                2. <b>避免选择 HTML 页面</b>：请勿勾选或选中 Document/HTML 页面，建议仅勾选具体的 <b>XHR / Fetch / WebSocket</b> 数据接口。<br/>
+                3. <b>重置记忆</b>：若经过多轮长会话，建议点击上方 <b>「🧹 清空对话」</b> 按钮重置上下文。
+            </div>
+            """
+        elif "exceed" in err_lower and "context" in err_lower:
             tip_html = """
             <div style="margin-top: 6px; font-size: 11.5px; color: #b91c1c; background-color: #fee2e2; padding: 6px; border-radius: 4px;">
                 💡 <b>原因与优化建议</b>：勾选的接口数量过多或历史对话太长（已超出模型 Context 限制）。<br/>
-                建议：取消全选，仅勾选 <b>3~8 个核心业务接口</b>，或点击顶部 <b>「🧹 清空对话」</b> 重置历史记忆。
+                建议：取消全选，仅勾选 <b>1~3 个核心业务接口</b>，或点击顶部 <b>「🧹 清空对话」</b> 重置历史记忆。
             </div>
             """
 

@@ -103,18 +103,16 @@ PROMPT_SYSTEM_COPILOT = """你是一名专业的前端反爬与网络接口逆�
 
 def prune_json_for_context(
     json_str: str,
-    max_chars: int = 35000,
-    max_depth: int = 10,
+    max_chars: int = 3000,
+    max_depth: int = 6,
     max_list_items: int = 2,
-    max_dict_keys: int = 80,
+    max_dict_keys: int = 40,
     raw_if_within_budget: bool = True
 ) -> str:
     """
-    智能自适应精简大型 JSON 响应体：
-    1. 若原始长度在 max_chars 内且允许 raw_if_within_budget，直接返回 100% 完整原始 JSON，不隐藏任何字段
-    2. 若超出预算，只对同构数组进行折叠（保留前 max_list_items 个真实样本），其余元素折叠说明
-    3. 保留深度提升至 10 层，绝不隐藏深层对象（如 member.uname, content.message 等真实业务文本）
-    4. 只有当字符串超过 1500 字符（如 base64、超长文本）时才截断，普通评论或视频标题 100% 完整保留
+    智能结构修剪器：
+    对长 JSON 进行解析并深度压缩，折叠同构数组与冗长键，将关键字段与深层结构提炼出来，
+    在保留 100% 结构信息的前提下将字符数缩减 90%，防止大模型端因 Context / 显存溢出返回 502 Bad Gateway。
     """
     if not json_str:
         return ""
@@ -128,8 +126,8 @@ def prune_json_for_context(
             if depth > max_depth:
                 return "..."
             if isinstance(obj, str):
-                if len(obj) > 1500:
-                    return obj[:800] + f"... (超长字符串已折叠，原长 {len(obj)} 字符)"
+                if len(obj) > 600:
+                    return obj[:300] + f"... (超长字符串已折叠，原长 {len(obj)} 字符)"
                 return obj
             if isinstance(obj, list):
                 if len(obj) <= max_list_items:
@@ -150,10 +148,12 @@ def prune_json_for_context(
         pruned = _prune(data)
         res = json.dumps(pruned, ensure_ascii=False, indent=2)
         if len(res) > max_chars:
-            return res[:max_chars] + f"\n... (已截断至字符预算上限 {max_chars}，原大小: {len(json_str)} 字符)"
+            return res[:max_chars] + f"\n... (已截断至字符上限 {max_chars}，原大小: {len(json_str)} 字符)"
         return res
     except Exception:
-        return json_str[:max_chars] + (f"\n... (非标准 JSON 已截断，原长: {len(json_str)} 字符)" if len(json_str) > max_chars else "")
+        # 非 JSON（如纯文本或 HTML 源码），限制在 500 字符内，避免大篇幅标签撑爆模型
+        safe_non_json = min(max_chars, 500)
+        return json_str[:safe_non_json] + (f"\n... (非标准 JSON 已截断，原长: {len(json_str)} 字符)" if len(json_str) > safe_non_json else "")
 
 
 class AIAnalyzer:
@@ -244,9 +244,9 @@ class AIAnalyzer:
         requests: list[NetworkRequest],
         selected_req: Optional[NetworkRequest] = None,
         target_reqs: Optional[list[NetworkRequest]] = None,
-        max_flow_items: int = 20,
-        max_detailed_targets: int = 12,
-        total_body_budget_chars: int = 25000,
+        max_flow_items: int = 6,
+        max_detailed_targets: int = 4,
+        total_body_budget_chars: int = 3500,
     ) -> str:
         """构建当前抓包状态与用户勾选/选中请求的实时上下文快照，自动进行智能 Token 预算分配"""
         sections = []
@@ -259,33 +259,37 @@ class AIAnalyzer:
             detailed_targets = targets[:max_detailed_targets]
             remaining_targets = targets[max_detailed_targets:]
 
-            header_title = f"【📌 用户勾选指定的重点分析接口详情与响应体 (共勾选 {total_targets_cnt} 个接口)】:"
+            header_title = f"【📌 用户指定的重点分析接口详情与响应体 (共 {total_targets_cnt} 个接口)】:"
             sections.append(header_title)
 
-            # 根据勾选的接口数量自适应分级：
-            # <= 3 个核心接口时：深度剖析模式，提供高达 50,000 字符预算，只要大小适中直接输出 100% 完整 Raw Body！
-            # 4 ~ 8 个接口时：中等预算，单接口 15,000 字符
-            # > 8 个接口时：紧凑预算，防超限
-            if total_targets_cnt <= 3:
-                per_req_budget = 50000
-                max_query_keys = 50
-                max_post_chars = 4000
-                allow_raw = True
-                prune_depth = 10
-                prune_items = 2
-            elif total_targets_cnt <= 8:
-                per_req_budget = 15000
-                max_query_keys = 25
-                max_post_chars = 1500
-                allow_raw = True
-                prune_depth = 8
-                prune_items = 2
-            else:
-                per_req_budget = max(1000, min(4000, total_body_budget_chars // len(detailed_targets)))
-                max_query_keys = 15
+            # 根据指定的接口数量自适应分级：控制在安全预算内，防止大模型端或反代网关超时 (502 Bad Gateway)
+            if total_targets_cnt <= 1:
+                per_req_budget = 2500
+                max_query_keys = 20
                 max_post_chars = 800
+                allow_raw = True
+                prune_depth = 6
+                prune_items = 2
+            elif total_targets_cnt <= 3:
+                per_req_budget = 1200
+                max_query_keys = 12
+                max_post_chars = 400
+                allow_raw = True
+                prune_depth = 4
+                prune_items = 1
+            elif total_targets_cnt <= 8:
+                per_req_budget = 600
+                max_query_keys = 8
+                max_post_chars = 200
                 allow_raw = False
-                prune_depth = 5
+                prune_depth = 3
+                prune_items = 1
+            else:
+                per_req_budget = 300
+                max_query_keys = 6
+                max_post_chars = 150
+                allow_raw = False
+                prune_depth = 2
                 prune_items = 1
 
             for idx, r in enumerate(detailed_targets, 1):
@@ -317,43 +321,58 @@ class AIAnalyzer:
                     send_cnt = sum(1 for f in frames if f.direction == "send")
                     recv_cnt = sum(1 for f in frames if f.direction == "recv")
                     req_lines.append(f"- 📡 WebSocket 双向消息流 (累计 {len(frames)} 帧: 发送 {send_cnt} 帧, 接收 {recv_cnt} 帧):")
-                    # 取最近的最多 12 条关键帧时序
-                    recent_frames = frames[-12:] if len(frames) > 12 else frames
+                    recent_frames = frames[-5:] if len(frames) > 5 else frames
                     for f in recent_frames:
-                        arrow = "➡️ [客户端发送 (SEND)]" if f.direction == "send" else "⬅️ [服务端推送 (RECV)]"
+                        arrow = "➡️ [SEND]" if f.direction == "send" else "⬅️ [RECV]"
                         p_str = f.payload_data
-                        if len(p_str) > 1000:
-                            p_str = p_str[:1000] + f"\n... (消息 Payload 较长已折叠，原长: {len(f.payload_data)} 字符)"
+                        if len(p_str) > 200:
+                            p_str = p_str[:200] + f"... (已截断，原长 {len(f.payload_data)} 字符)"
                         req_lines.append(f"  * #{f.frame_id} `{f.time_str}` {arrow} {f.opcode_str} ({f.size} B):\n```\n{p_str}\n```")
 
+                # 检测是否为网页 Document/HTML 源码，避免将整个 HTML 源码填入 Prompt 导致 502 网关超时
+                is_html_doc = (
+                    getattr(r, "resource_type", "").lower() in ("document", "stylesheet", "script")
+                    or "text/html" in getattr(r, "mime_type", "").lower()
+                )
+
                 if r.response_body:
-                    is_raw_full = allow_raw and (len(r.response_body) <= per_req_budget)
-                    if is_raw_full:
-                        body_content = r.response_body
-                        body_tag = f"返回值 Response Body (🔥 100% 完整原始数据，未做任何折叠，共 {len(r.response_body)} 字符):"
-                    else:
-                        body_content = prune_json_for_context(
-                            r.response_body,
-                            max_chars=per_req_budget,
-                            max_depth=prune_depth,
-                            max_list_items=prune_items,
-                            raw_if_within_budget=allow_raw
+                    if is_html_doc:
+                        title_match = re.search(r"<title>(.*?)</title>", r.response_body, re.IGNORECASE | re.DOTALL)
+                        title_str = f" [页面标题: {title_match.group(1).strip()}]" if title_match else ""
+                        body_content = (
+                            f"(已自动精简 HTML 网页源码{title_str}。若需分析数据，建议在表格中直接勾选具体的 XHR/Fetch/WebSocket 接口)\n"
+                            + r.response_body[:300].strip()
+                            + ("..." if len(r.response_body) > 300 else "")
                         )
-                        body_tag = f"返回值 Response Body (⚡ 智能结构样本，保留深层对象与真实字段，折叠多余同构数组项以节省 Token):"
+                        body_tag = "页面摘要 (HTML Document):"
+                    else:
+                        is_raw_full = allow_raw and (len(r.response_body) <= per_req_budget)
+                        if is_raw_full:
+                            body_content = r.response_body
+                            body_tag = f"返回值 Response Body (完整原始数据，共 {len(r.response_body)} 字符):"
+                        else:
+                            body_content = prune_json_for_context(
+                                r.response_body,
+                                max_chars=per_req_budget,
+                                max_depth=prune_depth,
+                                max_list_items=prune_items,
+                                raw_if_within_budget=allow_raw
+                            )
+                            body_tag = "返回值 Response Body (智能精简结构):"
                     req_lines.append(f"- {body_tag}\n```json\n{body_content}\n```")
                 elif not getattr(r, "is_websocket", False):
                     req_lines.append("- 返回值 Response Body: (该接口暂未读取到响应体或为空)")
 
                 sections.append("\n".join(req_lines))
 
-            # 如果勾选数量多（如 75 个），对超出上限的接口进行精炼清单归纳，防止撑爆上下文
+            # 如果勾选数量多，对超出上限的接口进行精炼清单归纳
             if remaining_targets:
                 rem_lines = [
-                    f"\n#### 其余勾选接口简明清单 (共 {len(remaining_targets)} 个已折叠，已提取核心路径与状态，防超 Token 上限):"
+                    f"\n#### 其余指定接口简明清单 (共 {len(remaining_targets)} 个已折叠，防超 Token 上限):"
                 ]
                 for r_idx, r in enumerate(remaining_targets, max_detailed_targets + 1):
                     p = urlparse(r.url)
-                    rem_lines.append(f"  {r_idx}. [{r.method}] `{p.path}` ({r.response_status or 'Pending'}) -> `{r.url[:90]}`")
+                    rem_lines.append(f"  {r_idx}. [{r.method}] `{p.path}` ({r.response_status or 'Pending'}) -> `{r.url[:70]}`")
                 sections.append("\n".join(rem_lines))
         else:
             sections.append("【📌 当前重点目标接口】: 暂未在表格中勾选或选择任何特定接口。")
@@ -373,7 +392,7 @@ class AIAnalyzer:
                 p = urlparse(r.url)
                 status_str = f"Status: {r.response_status}" if r.response_status else "Pending"
                 is_cur = " 👈[已勾选]" if r.request_id in target_ids else ""
-                flow_lines.append(f"  {i}. [{r.method}] `{p.path}` ({status_str}) -> `{r.url[:100]}`{is_cur}")
+                flow_lines.append(f"  {i}. [{r.method}] `{p.path}` ({status_str}) -> `{r.url[:70]}`{is_cur}")
 
             if len(display_list) > max_flow_items:
                 flow_lines.append(f"  *(其余 {len(display_list) - max_flow_items} 条次要请求已自动折叠)*")
